@@ -1,28 +1,15 @@
 # -*- coding: utf-8 -*-
-import json
 import pandas as pd
 import tweepy
 
 
 N_TWEETS_PER_REQUEST = 200
-N_TWEETS_REMAINING = 80000
 
 
-def from_twitter(profile,
-                 access_token=None,
-                 access_token_secret=None,
-                 consumer_key=None,
-                 consumer_secret=None,
-                 as_file=None,
-                 ):
+def from_twitter(profile, access_token=None, access_token_secret=None,
+                 consumer_key=None, consumer_secret=None, as_file=None):
     """
-    A convenience function to directly download the timeline of a Twitter
-    profile. It does the following steps:
-
-    - register credentials.
-    - download the timelines of a list of profiles.
-    - return the timelines as a :code:`pandas.DataFrame`.
-    - optional: save the timelines to disk.
+    Downloads the timeline of a Twitter profile and turn it into a dataframe.
 
     Args:
         profiles: scalar or list of one/multiple Twitter screen names.
@@ -31,95 +18,81 @@ def from_twitter(profile,
         consumer_key: the consumer key as provided by Twitter.
         consumer_secret:the consumer secret as provided by Twitter.
         as_file: boolean.
+    Returns:
+        A dataframe, each row is a Tweet.
 
     """
 
-    api = provide_credentials(consumer_key=consumer_key,
-                              consumer_secret=consumer_secret,
-                              access_token=access_token,
-                              access_token_secret=access_token_secret)
+    api = authenticate(
+        consumer_key=consumer_key, consumer_secret=consumer_secret,
+        access_token=access_token, access_token_secret=access_token_secret)
     if not api.verify_credentials():
         print("Credentials are invalid.")
         return None
 
-    timeline = crawl(api,
-                     profile,
-                     n_tweets_per_request=N_TWEETS_PER_REQUEST,
-                     n_tweets_remaining=N_TWEETS_REMAINING,
-                     )
+    pages = fetch_timeline_pages(
+        api, profile, n_tweets_per_request=N_TWEETS_PER_REQUEST)
+
+    pages = [pd.DataFrame(page) for page in pages]
+    df = pd.concat(pages)
+    df['created_at'] = pd.to_datetime(df['created_at'])
+    df.drop_duplicates(subset='created_at', inplace=True)
 
     if as_file:
-        timeline.to_csv(f'{profile}.csv', index=False)
+        df.to_csv(f'{profile}.csv', index=False)
 
-    return timeline
+    return df
 
 
-def provide_credentials(consumer_key=None, consumer_secret=None,
-                        access_token=None, access_token_secret=None):
+def authenticate(access_token=None, access_token_secret=None,
+                 consumer_key=None, consumer_secret=None,):
+    """
+    Sends the credentials to the Twitter API and returns an API object upon
+    success.
+
+    Args:
+        access_token: the access token as provided by Twitter.
+        access_token_secret: the access token as provided by Twitter.
+        consumer_key: the consumer key as provided by Twitter.
+        consumer_secret:the consumer secret as provided by Twitter.
+    """
     oauth = tweepy.OAuthHandler(consumer_key, consumer_secret)
     oauth.set_access_token(access_token, access_token_secret)
     api = tweepy.API(oauth)
     return api
 
 
-def crawl(api, profile, n_tweets_per_request=None, n_tweets_remaining=None):
+def fetch_timeline_pages(api, profile, n_tweets_per_request=None):
+    """
+    Browses through the timeline of the profile and appends each returned
+    page objects to a list, which is returned.
 
+    Args: api: a
+        profile: the Twitter profile's screen name as a string.
+        n_tweets_per_request: number of Tweets Twitter will return per request.
+    Returns:
+        list: the returned timeline pages.
+    """
     # Twitter allows a maximum of 200, see https://developer.twitter.com/en
     # /docs/tweets/timelines/api-reference/get-statuses-user_timeline.html
 
     id_oldest_tweet = None
-    timeline = pd.DataFrame()
+    pages = []
 
     while True:
-        new_timeline = fetch_timeline(
+        page = fetch_timeline_page(
             api, profile, include_rts=True, max_id=id_oldest_tweet,
-            n_tweets_per_request=n_tweets_per_request,
-            n_tweets_remaining=n_tweets_remaining)
-        if len(new_timeline) == 1:
+            n_tweets_per_request=n_tweets_per_request)
+        if is_last_page(page):
             break
-        if len(new_timeline) == 0:
-            break
+        id_oldest_tweet = page[-1]['id']
+        pages.append(page)
 
-        new_timeline = load_as_df(new_timeline)
-        if timeline.empty:
-            timeline = load_as_df(new_timeline)
-        else:
-            timeline = timeline.append(new_timeline,
-                                       ignore_index=True,
-                                       sort=True)
-
-        id_oldest_tweet = get_id_oldest_tweet(timeline)
-
-    timeline = remove_duplicates(timeline)
-    return timeline
+    return pages
 
 
-def get_id_oldest_tweet(timeline):
-    idx = timeline.index[timeline['created_at']
-                         == timeline['created_at'].min()]
-    idx = idx.tolist()[0]
-    id_oldest_tweet = timeline.loc[idx, 'id']
-    return id_oldest_tweet
-
-
-def remove_duplicates(timeline):
-    """
-    Removes duplicates that occur during the crawl process. Currently, this is
-    when the profile.timeline() method is called with a max_id. Twitter
-    includes the Twitter with this ID in the response too, even though it is
-    already there in the response of the previous call.
-    """
-    timeline.drop_duplicates(subset='created_at', inplace=True)
-    return timeline
-
-
-def fetch_timeline(api,
-                   profile,
-                   include_rts=None,
-                   max_id=None,
-                   n_tweets_per_request=None,
-                   n_tweets_remaining=None,
-                   ):
+def fetch_timeline_page(api, profile, include_rts=None, max_id=None,
+                        n_tweets_per_request=None):
     """
     Iterates over the timeline of a profile and returns the result as a list
     of .json
@@ -132,31 +105,19 @@ def fetch_timeline(api,
     Returns:
         list: A list of Tweets as json objects.
     """
-    timeline = api.user_timeline(profile,
-                                 count=n_tweets_per_request,
-                                 include_rts=True,
-                                 max_id=max_id)
-    timeline = timeline[:n_tweets_remaining]
-    timeline = [preserve_json(k) for k in timeline]
-    return timeline
+    timeline = api.user_timeline(profile, count=n_tweets_per_request,
+                                 include_rts=True, max_id=max_id)
+    return [tweet._json for tweet in timeline]
 
 
-def preserve_json(tweet):
-    tweet = tweet._json
-    tweet['entities'] = json.dumps(tweet['entities'])
-    tweet['user'] = json.dumps(tweet['user'])
-    return tweet
-
-
-def load_as_df(timeline):
+def is_last_page(page):
     """
-    Turns a Twitter timeline into a DataFrame, and converts all columns to the
-    required datatype.
+    The last page is either empty or only the one Tweet, the last Tweet of the
+    previous page repeated.
 
     Args:
-        timeline: A list with Tweets as json objects.
+        page: a Twitter timeline page
+    Returns:
+        boolean: True if page is the last page.
     """
-
-    timeline = pd.DataFrame(timeline)
-    timeline['created_at'] = pd.to_datetime(timeline['created_at'])
-    return timeline
+    return len(page) == 1 or len(page) == 0
