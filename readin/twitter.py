@@ -1,4 +1,6 @@
 # -*- coding: utf-8 -*-
+import json
+
 import pandas as pd
 import tweepy
 
@@ -107,7 +109,14 @@ def fetch_timeline_page(api, profile, include_rts=None, max_id=None,
     """
     timeline = api.user_timeline(profile, count=n_tweets_per_request,
                                  include_rts=True, max_id=max_id)
-    return [tweet._json for tweet in timeline]
+    return [preserve_json(tweet) for tweet in timeline]
+
+
+def preserve_json(tweet):
+    tweet = tweet._json
+    tweet['entities'] = json.dumps(tweet['entities'])
+    tweet['user'] = json.dumps(tweet['user'])
+    return tweet
 
 
 def is_last_page(page):
